@@ -13,7 +13,7 @@ use nautilus_model::{
 };
 use nautilus_core::UnixNanos;
 
-use crate::config::AppConfig;
+use crate::config::{BacktestConfig, VenueConfig};
 use crate::data::{load_quotes, load_bars_as_quotes};
 use crate::strategies::glft::GlftStrategy;
 
@@ -64,35 +64,50 @@ fn build_instrument(
     Ok(InstrumentAny::CurrencyPair(pair))
 }
 
-pub fn run_backtest(cfg: &AppConfig) -> anyhow::Result<()> {
-    info!("Initialising BacktestEngine for symbol={}", cfg.data.symbol);
+/// Parse VenueConfig strings into nautilus enums.
+fn parse_venue_config(vcfg: &VenueConfig) -> anyhow::Result<SimulatedVenueConfig> {
+    let venue = Venue::from(vcfg.name.as_str());
+
+    let oms_type = match vcfg.oms_type.as_str() {
+        "Netting"  => OmsType::Netting,
+        "Hedging"  => OmsType::Hedging,
+        other      => anyhow::bail!("Unknown oms_type: {}", other),
+    };
+    let account_type = match vcfg.account_type.as_str() {
+        "Cash"   => AccountType::Cash,
+        "Margin" => AccountType::Margin,
+        other    => anyhow::bail!("Unknown account_type: {}", other),
+    };
+    let book_type = match vcfg.book_type.as_str() {
+        "L1_MBP" => BookType::L1_MBP,
+        "L2_MBP" => BookType::L2_MBP,
+        "L3_MBO" => BookType::L3_MBO,
+        other    => anyhow::bail!("Unknown book_type: {}", other),
+    };
+
+    Ok(SimulatedVenueConfig::builder()
+        .venue(venue)
+        .oms_type(oms_type)
+        .account_type(account_type)
+        .book_type(book_type)
+        .starting_balances(vec![Money::from(vcfg.starting_balance.as_str())])
+        .build())
+}
+
+pub fn run_backtest(cfg: &BacktestConfig) -> anyhow::Result<()> {
+    info!(
+        "Initialising BacktestEngine | symbol={} venue={}",
+        cfg.data.symbol, cfg.venue.name
+    );
 
     let mut engine = BacktestEngine::new(BacktestEngineConfig::default())?;
 
-    // Parse venue from symbol (e.g. "BTC-USDT.BINANCE" → venue="BINANCE")
-    let venue_str = cfg.data.symbol
-        .split('.')
-        .nth(1)
-        .unwrap_or("SIM");
-    let venue = Venue::from(venue_str);
+    engine.add_venue(parse_venue_config(&cfg.venue)?)?;
 
-    // Build InstrumentId
     let instrument_id = InstrumentId::from(cfg.data.symbol.as_str());
+    let price_precision = cfg.data.price_precision;
+    let size_precision  = cfg.data.size_precision;
 
-    let price_precision = cfg.data.price_precision.unwrap_or(2);
-    let size_precision = cfg.data.size_precision.unwrap_or(6);
-
-    engine.add_venue(
-        SimulatedVenueConfig::builder()
-            .venue(venue)
-            .oms_type(OmsType::Netting)
-            .account_type(AccountType::Cash)
-            .book_type(BookType::L1_MBP)
-            .starting_balances(vec![Money::from("100000 USDT")])
-            .build(),
-    )?;
-
-    // Register instrument before adding data
     let instrument = build_instrument(instrument_id, price_precision, size_precision)?;
     engine.add_instrument(&instrument)?;
 
@@ -104,7 +119,7 @@ pub fn run_backtest(cfg: &AppConfig) -> anyhow::Result<()> {
         .to_lowercase();
 
     let quotes_path = data_dir.join(format!("{}_quotes.csv", stem));
-    let bars_path = data_dir.join(format!("{}_bars.csv", stem));
+    let bars_path   = data_dir.join(format!("{}_bars.csv", stem));
 
     let data = if quotes_path.exists() {
         info!("Loading quotes from {}", quotes_path.display());
@@ -129,8 +144,7 @@ pub fn run_backtest(cfg: &AppConfig) -> anyhow::Result<()> {
         engine.add_data(data, None, true, true)?;
     }
 
-    // Add strategy
-    let strategy = GlftStrategy::new(instrument_id, cfg.strategy.glft.clone());
+    let strategy = GlftStrategy::new(instrument_id, cfg.strategy.clone());
     engine.add_strategy(strategy)?;
 
     info!("Starting backtest replay...");

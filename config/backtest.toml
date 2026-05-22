@@ -1,24 +1,45 @@
-run_mode = "Backtest"
-
+# ── Data ────────────────────────────────────────────────────────────────────
 [data]
-data_dir = "data"
-symbol = "BTC-USDT.BINANCE"
+data_dir        = "data"
+symbol          = "BTC-USDT.BINANCE"
+start_date      = "2024-01-01"
+end_date        = "2024-03-31"
 price_precision = 2
-size_precision = 6
+size_precision  = 6
 
+# ── Simulated venue ──────────────────────────────────────────────────────────
+[venue]
+name              = "BINANCE"
+oms_type          = "Netting"
+account_type      = "Cash"
+book_type         = "L1_MBP"
+starting_balance  = "100000 USDT"
+
+# ── Logging ──────────────────────────────────────────────────────────────────
 [logging]
-log_dir = "logs"
-log_level = "info"
+log_dir     = "logs"
+log_level   = "info"
 log_to_file = true
 
-[strategy.glft]
-gamma = 0.1
-kappa = 1.5
-sigma = 0.02
-time_horizon_secs = 3600
-min_spread_bps = 2.0
-max_inventory = 1.0
-order_size = 0.01
-quote_refresh_ms = 1000
-vol_window = 100
+# ── GLFT strategy parameters ─────────────────────────────────────────────────
+[strategy]
+# Risk-aversion coefficient γ (higher → wider spreads, less risk)
+gamma                        = 0.1
+# Order-book depth parameter κ
+kappa                        = 1.5
+# Initial annualised volatility estimate (overridden by live estimate once ready)
+sigma                        = 0.02
+# Optimisation time horizon T in seconds (resets each cycle)
+time_horizon_secs            = 3600
+# Minimum half-spread floor in basis points
+min_spread_bps               = 2.0
+# Maximum absolute inventory in base currency (BTC)
+max_inventory                = 1.0
+# Quote size per side (BTC)
+order_size                   = 0.01
+# Minimum milliseconds between quote refreshes
+quote_refresh_ms             = 1000
+# Rolling window for volatility estimation (number of price updates)
+vol_window                   = 100
+# Pause quoting when current_vol > base_vol × this multiplier
 volatility_regime_multiplier = 3.0

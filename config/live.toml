@@ -1,27 +1,26 @@
-run_mode = "Live"
+# ── Live exchange connection ──────────────────────────────────────────────────
+[exchange]
+venue      = "BINANCE"
+ws_url     = "wss://stream.binance.com:9443/ws"
+rest_url   = "https://api.binance.com"
+api_key    = "YOUR_API_KEY"
+api_secret = "YOUR_API_SECRET"
 
-[data]
-data_dir = "data"
-symbol = "BTC-USDT.BINANCE"
-
+# ── Logging ──────────────────────────────────────────────────────────────────
 [logging]
-log_dir = "logs"
-log_level = "info"
+log_dir     = "logs"
+log_level   = "info"
 log_to_file = true
 
-[exchange]
-ws_url = "wss://stream.binance.com:9443/ws"
-api_key = "YOUR_API_KEY_HERE"
-api_secret = "YOUR_API_SECRET_HERE"
-
-[strategy.glft]
-gamma = 0.1
-kappa = 1.5
-sigma = 0.02
-time_horizon_secs = 3600
-min_spread_bps = 2.0
-max_inventory = 1.0
-order_size = 0.01
-quote_refresh_ms = 1000
-vol_window = 100
+# ── GLFT strategy parameters ─────────────────────────────────────────────────
+[strategy]
+gamma                        = 0.1
+kappa                        = 1.5
+sigma                        = 0.02
+time_horizon_secs            = 3600
+min_spread_bps               = 2.0
+max_inventory                = 1.0
+order_size                   = 0.01
+quote_refresh_ms             = 1000
+vol_window                   = 100
 volatility_regime_multiplier = 3.0
