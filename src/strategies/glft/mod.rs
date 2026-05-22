@@ -10,8 +10,8 @@ use log::{info, debug, warn};
 use nautilus_common::actor::DataActor;
 use nautilus_model::{
     data::QuoteTick,
-    enums::{OrderSide, TimeInForce},
-    events::{OrderFilled, OrderRejected},
+    enums::{OrderSide, OrderStatus, TimeInForce},
+    events::{OrderCanceled, OrderFilled, OrderRejected},
     identifiers::{ClientOrderId, InstrumentId, StrategyId},
     orders::Order,
     types::{Price, Quantity},
@@ -243,24 +243,50 @@ impl DataActor for GlftStrategy {
     }
 
     fn on_order_filled(&mut self, event: &OrderFilled) -> anyhow::Result<()> {
-        self.risk.on_fill();
+        // An order can be partially filled multiple times with the same client_order_id.
+        // Check the order status from cache to distinguish partial vs full fill.
+        let is_fully_filled = self
+            .cache()
+            .order(&event.client_order_id)
+            .map(|o| o.status() == OrderStatus::Filled)
+            .unwrap_or(true); // assume complete if order not in cache
 
-        // Clear active order tracking
+        let commission = event.commission.map(|m| m.as_f64()).unwrap_or(0.0);
+        self.tracker.record_fill(-commission);
+
+        if is_fully_filled {
+            // Order fully filled — clear active tracking and reset rejection counter
+            self.risk.on_fill();
+            if Some(event.client_order_id) == self.active_bid {
+                self.active_bid = None;
+            }
+            if Some(event.client_order_id) == self.active_ask {
+                self.active_ask = None;
+            }
+            info!(
+                "Order fully filled side={:?} price={} qty={} commission={}",
+                event.order_side, event.last_px, event.last_qty, commission
+            );
+        } else {
+            info!(
+                "Order partially filled side={:?} price={} qty={} commission={}",
+                event.order_side, event.last_px, event.last_qty, commission
+            );
+        }
+        Ok(())
+    }
+
+    fn on_order_canceled(&mut self, event: &OrderCanceled) -> anyhow::Result<()> {
+        // Triggered when cancel_all_orders() confirms cancellation of a resting order.
+        // A partially filled order that is then cancelled will arrive here for the
+        // remaining (unfilled) quantity — safe to clear active tracking at this point.
         if Some(event.client_order_id) == self.active_bid {
             self.active_bid = None;
         }
         if Some(event.client_order_id) == self.active_ask {
             self.active_ask = None;
         }
-
-        // Track commission impact for Sharpe/drawdown (nautilus Portfolio handles actual PnL)
-        let commission = event.commission.map(|m| m.as_f64()).unwrap_or(0.0);
-        self.tracker.record_fill(-commission);
-
-        info!(
-            "Order filled side={:?} price={} qty={} commission={}",
-            event.order_side, event.last_px, event.last_qty, commission
-        );
+        debug!("Order canceled order_id={}", event.client_order_id);
         Ok(())
     }
 
