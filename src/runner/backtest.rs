@@ -1,5 +1,5 @@
 use std::path::PathBuf;
-use tracing::{info, warn};
+use log::{info, warn};
 
 use crate::config::AppConfig;
 use crate::data::{DataFeed, load_quotes, load_bars};

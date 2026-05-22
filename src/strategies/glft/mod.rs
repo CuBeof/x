@@ -5,7 +5,7 @@ pub mod risk;
 
 use std::time::{Duration, Instant};
 use uuid::Uuid;
-use tracing::{info, debug, warn};
+use log::{info, debug, warn};
 
 use crate::config::GlftConfig;
 use crate::engine::event::{MarketEvent, OrderEvent, OrderSide};
@@ -67,10 +67,8 @@ impl Strategy for GlftStrategy {
         self.start_time = Some(Instant::now());
         self.last_quote_time = None;
         info!(
-            gamma = self.config.gamma,
-            kappa = self.config.kappa,
-            sigma = self.config.sigma,
-            "GLFT strategy started"
+            "GLFT strategy started gamma={} kappa={} sigma={}",
+            self.config.gamma, self.config.kappa, self.config.sigma
         );
     }
 
@@ -107,7 +105,7 @@ impl Strategy for GlftStrategy {
         let risk_state = risk_state.clone();
 
         if !self.risk.is_quoting_allowed() && risk_state != RiskState::InventoryBreached {
-            debug!(?risk_state, "Quoting blocked by risk manager");
+            debug!("Quoting blocked by risk manager state={:?}", risk_state);
             return;
         }
 
@@ -161,11 +159,8 @@ impl Strategy for GlftStrategy {
             });
             self.active_bid = Some(oid);
             debug!(
-                price = bid_price,
-                size = decision.bid_size,
-                reservation = decision.reservation_price,
-                half_spread = decision.half_spread,
-                "Submitted bid"
+                "Submitted bid price={:.6} size={} reservation={:.6} half_spread={:.6}",
+                bid_price, decision.bid_size, decision.reservation_price, decision.half_spread
             );
         }
 
@@ -181,9 +176,8 @@ impl Strategy for GlftStrategy {
             });
             self.active_ask = Some(oid);
             debug!(
-                price = ask_price,
-                size = decision.ask_size,
-                "Submitted ask"
+                "Submitted ask price={:.6} size={}",
+                ask_price, decision.ask_size
             );
         }
 
@@ -211,19 +205,15 @@ impl Strategy for GlftStrategy {
                 }
 
                 info!(
-                    side = ?fill.side,
-                    price = fill.price,
-                    size = fill.size,
-                    fee = fill.fee,
-                    realized_pnl = realized,
-                    total_realized = self.inventory.realized_pnl,
-                    position = self.inventory.position,
-                    "Order filled"
+                    "Order filled side={:?} price={:.6} size={} fee={:.6} \
+                     realized_pnl={:.6} total_realized={:.6} position={:.6}",
+                    fill.side, fill.price, fill.size, fill.fee,
+                    realized, self.inventory.realized_pnl, self.inventory.position
                 );
             }
             OrderEvent::Rejected { order_id, reason } => {
                 self.risk.on_rejection();
-                warn!(order_id = %order_id, reason, "Order rejected");
+                warn!("Order rejected order_id={} reason={}", order_id, reason);
 
                 if Some(*order_id) == self.active_bid {
                     self.active_bid = None;
@@ -233,7 +223,7 @@ impl Strategy for GlftStrategy {
                 }
             }
             OrderEvent::Cancelled(order_id) => {
-                debug!(order_id = %order_id, "Order cancelled");
+                debug!("Order cancelled order_id={}", order_id);
                 if Some(*order_id) == self.active_bid {
                     self.active_bid = None;
                 }
@@ -242,7 +232,7 @@ impl Strategy for GlftStrategy {
                 }
             }
             OrderEvent::Accepted(order_id) => {
-                debug!(order_id = %order_id, "Order accepted");
+                debug!("Order accepted order_id={}", order_id);
             }
         }
     }
@@ -251,13 +241,11 @@ impl Strategy for GlftStrategy {
         let mid = self.last_mid;
         let summary = self.summary_with_mid(mid);
         info!(
-            realized_pnl = summary.realized_pnl,
-            unrealized_pnl = summary.unrealized_pnl,
-            total_trades = summary.total_trades,
-            inventory = summary.inventory,
-            sharpe = summary.sharpe_ratio,
-            max_dd = summary.max_drawdown,
-            "GLFT strategy stopped"
+            "GLFT strategy stopped realized_pnl={:.6} unrealized_pnl={:.6} \
+             total_trades={} inventory={:.6} sharpe={:.4} max_dd={:.4}",
+            summary.realized_pnl, summary.unrealized_pnl,
+            summary.total_trades, summary.inventory,
+            summary.sharpe_ratio, summary.max_drawdown
         );
     }
 

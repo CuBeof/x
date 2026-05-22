@@ -1,4 +1,4 @@
-use tracing::{info, warn};
+use log::{info, warn};
 
 use crate::config::AppConfig;
 use crate::runner::Runner;
@@ -17,9 +17,9 @@ impl PaperRunner {
 impl Runner for PaperRunner {
     fn run(&mut self, _strategy: Box<dyn Strategy>) -> anyhow::Result<StrategySummary> {
         warn!(
-            symbol = %self.config.data.symbol,
-            "Paper trading not yet connected to live feed. \
-             Implement a WebSocket connector to stream live quotes."
+            "Paper trading not yet connected to live feed (symbol={}). \
+             Implement a WebSocket connector to stream live quotes.",
+            self.config.data.symbol
         );
         info!("Paper runner: returning empty summary");
         Ok(StrategySummary::default())

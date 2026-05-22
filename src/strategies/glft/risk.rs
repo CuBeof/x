@@ -1,4 +1,5 @@
 use std::time::{Duration, Instant};
+use log::{info, debug, warn};
 use crate::strategies::glft::indicators::GlftIndicators;
 
 #[derive(Debug, Clone, PartialEq)]
@@ -38,7 +39,7 @@ impl RiskManager {
             if Instant::now() >= until {
                 self.pause_until = None;
                 self.consecutive_rejections = 0;
-                tracing::info!("Risk pause expired, resuming");
+                info!("Risk pause expired, resuming Normal state");
             } else {
                 self.state = RiskState::Paused;
                 return &self.state;
@@ -52,7 +53,7 @@ impl RiskManager {
             self.vol_observations += 1;
             if self.vol_observations >= 50 {
                 self.base_volatility = Some(vol.max(0.001));
-                tracing::info!(base_vol = vol, "Calibrated base volatility");
+                info!("Calibrated base volatility base_vol={:.6}", vol);
             }
         }
 
@@ -60,9 +61,9 @@ impl RiskManager {
         if self.consecutive_rejections >= 5 {
             self.state = RiskState::Paused;
             self.pause_until = Some(Instant::now() + Duration::from_secs(10));
-            tracing::warn!(
-                rejections = self.consecutive_rejections,
-                "Too many rejections, pausing 10s"
+            warn!(
+                "Too many rejections, pausing 10s rejections={}",
+                self.consecutive_rejections
             );
             return &self.state;
         }
@@ -70,7 +71,10 @@ impl RiskManager {
         // Inventory breach
         if position.abs() >= self.max_inventory {
             self.state = RiskState::InventoryBreached;
-            tracing::warn!(position, max = self.max_inventory, "Inventory limit breached");
+            warn!(
+                "Inventory limit breached position={:.6} max={:.6}",
+                position, self.max_inventory
+            );
             return &self.state;
         }
 
@@ -79,11 +83,10 @@ impl RiskManager {
             if vol > base_vol * self.vol_multiplier {
                 self.state = RiskState::HighVolatility;
                 self.pause_until = Some(Instant::now() + Duration::from_secs(30));
-                tracing::warn!(
-                    current_vol = vol,
-                    base_vol,
-                    threshold = base_vol * self.vol_multiplier,
-                    "High volatility, pausing 30s"
+                warn!(
+                    "High volatility detected, pausing 30s \
+                     current_vol={:.6} base_vol={:.6} threshold={:.6}",
+                    vol, base_vol, base_vol * self.vol_multiplier
                 );
                 return &self.state;
             }
@@ -105,7 +108,7 @@ impl RiskManager {
 
     pub fn on_rejection(&mut self) {
         self.consecutive_rejections += 1;
-        tracing::debug!(count = self.consecutive_rejections, "Order rejected");
+        debug!("Order rejected count={}", self.consecutive_rejections);
     }
 
     pub fn on_fill(&mut self) {
