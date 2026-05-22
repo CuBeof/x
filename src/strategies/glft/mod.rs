@@ -3,43 +3,79 @@ pub mod inventory;
 pub mod quoter;
 pub mod risk;
 
+use std::fmt::Debug;
 use std::time::{Duration, Instant};
-use uuid::Uuid;
 use log::{info, debug, warn};
 
+use nautilus_common::actor::DataActor;
+use nautilus_model::{
+    data::QuoteTick,
+    enums::{OrderSide, TimeInForce},
+    events::{OrderFilled, OrderRejected},
+    identifiers::{ClientOrderId, InstrumentId, StrategyId},
+    orders::Order,
+    types::{Price, Quantity},
+};
+use nautilus_trading::{
+    Strategy,
+    nautilus_strategy,
+    strategy::{StrategyConfig, StrategyCore},
+};
+
 use crate::config::GlftConfig;
-use crate::engine::event::{MarketEvent, OrderEvent, OrderSide};
-use crate::engine::{Engine, OpenOrder};
-use crate::strategies::{Strategy, StrategySummary};
 use self::indicators::GlftIndicators;
-use self::inventory::InventoryManager;
+use self::inventory::TradeTracker;
 use self::quoter::GlftQuoter;
 use self::risk::{RiskManager, RiskState};
 
 pub struct GlftStrategy {
+    core: StrategyCore,
+    instrument_id: InstrumentId,
     config: GlftConfig,
     indicators: GlftIndicators,
-    inventory: InventoryManager,
+    tracker: TradeTracker,
     quoter: GlftQuoter,
     risk: RiskManager,
-    active_bid: Option<Uuid>,
-    active_ask: Option<Uuid>,
+    active_bid: Option<ClientOrderId>,
+    active_ask: Option<ClientOrderId>,
     start_time: Option<Instant>,
     last_quote_time: Option<Instant>,
     last_mid: f64,
 }
 
+impl Debug for GlftStrategy {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("GlftStrategy")
+            .field("instrument_id", &self.instrument_id)
+            .finish()
+    }
+}
+
+nautilus_strategy!(GlftStrategy, {
+    fn on_order_rejected(&mut self, event: OrderRejected) {
+        self.risk.on_rejection();
+        warn!("Order rejected reason={}", event.reason);
+    }
+});
+
 impl GlftStrategy {
-    pub fn new(config: GlftConfig) -> Self {
+    pub fn new(instrument_id: InstrumentId, config: GlftConfig) -> Self {
+        let strategy_config = StrategyConfig {
+            strategy_id: Some(StrategyId::new("GLFT-001")),
+            order_id_tag: Some("001".to_string()),
+            ..Default::default()
+        };
         let indicators = GlftIndicators::new(config.vol_window as usize);
-        let inventory = InventoryManager::new(config.max_inventory);
+        let tracker = TradeTracker::new();
         let quoter = GlftQuoter::new(config.gamma, config.kappa, config.min_spread_bps);
         let risk = RiskManager::new(config.volatility_regime_multiplier, config.max_inventory);
 
         Self {
+            core: StrategyCore::new(strategy_config),
+            instrument_id,
             config,
             indicators,
-            inventory,
+            tracker,
             quoter,
             risk,
             active_bid: None,
@@ -56,70 +92,68 @@ impl GlftStrategy {
             Some(t) => t.elapsed() >= Duration::from_millis(self.config.quote_refresh_ms),
         }
     }
+
+    fn elapsed_secs(&self) -> f64 {
+        self.start_time
+            .map(|t| t.elapsed().as_secs_f64())
+            .unwrap_or(0.0)
+    }
+
+    fn net_position(&self) -> f64 {
+        use rust_decimal::prelude::ToPrimitive;
+        self.core
+            .portfolio()
+            .borrow()
+            .net_position(&self.instrument_id)
+            .to_f64()
+            .unwrap_or(0.0)
+    }
 }
 
-impl Strategy for GlftStrategy {
-    fn name(&self) -> &str {
-        "GLFT"
-    }
-
-    fn on_start(&mut self) {
+impl DataActor for GlftStrategy {
+    fn on_start(&mut self) -> anyhow::Result<()> {
         self.start_time = Some(Instant::now());
-        self.last_quote_time = None;
+        self.subscribe_quotes(self.instrument_id, None, None);
         info!(
-            "GLFT strategy started gamma={} kappa={} sigma={}",
-            self.config.gamma, self.config.kappa, self.config.sigma
+            "GLFT strategy started instrument={} gamma={} kappa={} sigma={}",
+            self.instrument_id,
+            self.config.gamma,
+            self.config.kappa,
+            self.config.sigma
         );
+        Ok(())
     }
 
-    fn on_market_event(&mut self, event: &MarketEvent, engine: &mut Engine) {
+    fn on_quote(&mut self, quote: &QuoteTick) -> anyhow::Result<()> {
+        let bid = quote.bid_price.as_f64();
+        let ask = quote.ask_price.as_f64();
+        let mid = (bid + ask) / 2.0;
+        self.last_mid = mid;
+
         // Update indicators
-        self.indicators.update(event);
+        self.indicators.update_quote(bid, ask);
 
-        // Extract mid price from quote events
-        let mid = match event {
-            MarketEvent::QuoteUpdate(q) => {
-                let m = q.mid_price();
-                self.last_mid = m;
-                Some(m)
-            }
-            MarketEvent::BarUpdate(b) => {
-                self.last_mid = b.close;
-                Some(b.close)
-            }
-            MarketEvent::TradeUpdate(t) => {
-                self.last_mid = t.price;
-                Some(t.price)
-            }
-        };
+        // Get portfolio position
+        let position = self.net_position();
 
-        let mid = match mid {
-            Some(m) if m > 0.0 => m,
-            _ => return,
-        };
+        // Risk check
+        let risk_state = self.risk.check_risk(&self.indicators, position).clone();
 
-        // Assess risk
-        let risk_state = self
-            .risk
-            .check_risk(&self.indicators, self.inventory.position);
-        let risk_state = risk_state.clone();
-
-        if !self.risk.is_quoting_allowed() && risk_state != RiskState::InventoryBreached {
-            debug!("Quoting blocked by risk manager state={:?}", risk_state);
-            return;
+        if !matches!(risk_state, RiskState::Normal | RiskState::InventoryBreached) {
+            debug!("Quoting blocked state={:?}", risk_state);
+            return Ok(());
         }
 
-        // Check if it is time to refresh quotes
         if !self.refresh_due() {
-            return;
+            return Ok(());
         }
 
-        // Cancel all existing orders
-        engine.cancel_all();
+        // Cancel existing orders
+        self.cancel_all_orders(self.instrument_id, None, None, None)?;
         self.active_bid = None;
         self.active_ask = None;
 
-        // Compute sigma: use live estimate if ready, else fall back to config
+        // Compute sigma
         let sigma = if self.indicators.is_ready() {
             let v = self.indicators.volatility();
             if v > 0.0 { v } else { self.config.sigma }
@@ -127,16 +161,11 @@ impl Strategy for GlftStrategy {
             self.config.sigma
         };
 
-        let elapsed_secs = self
-            .start_time
-            .map(|t| t.elapsed().as_secs_f64())
-            .unwrap_or(0.0);
-
         let decision = self.quoter.compute(
             mid,
-            self.inventory.position,
+            position,
             sigma,
-            elapsed_secs,
+            self.elapsed_secs(),
             self.config.time_horizon_secs as f64,
             self.config.order_size,
             &risk_state,
@@ -144,132 +173,104 @@ impl Strategy for GlftStrategy {
 
         if !decision.should_quote {
             self.last_quote_time = Some(Instant::now());
-            return;
+            return Ok(());
         }
 
-        // Submit bid
+        // Submit bid (post-only)
         if let Some(bid_price) = decision.bid_price {
-            let oid = Uuid::new_v4();
-            engine.submit_order(OpenOrder {
-                order_id: oid,
-                side: OrderSide::Buy,
-                price: bid_price,
-                size: decision.bid_size,
-                is_post_only: true,
-            });
-            self.active_bid = Some(oid);
+            let price = Price::new(bid_price, 8);
+            let qty = Quantity::new(decision.bid_size, 8);
+            let order = self.core.order_factory().limit(
+                self.instrument_id,
+                OrderSide::Buy,
+                qty,
+                price,
+                Some(TimeInForce::Gtc),
+                None,       // expire_time
+                Some(true), // post_only
+                None,       // reduce_only
+                None,       // quote_quantity
+                None,       // display_qty
+                None,       // emulation_trigger
+                None,       // trigger_instrument_id
+                None,       // exec_algorithm_id
+                None,       // exec_algorithm_params
+                None,       // tags
+                None,       // client_order_id
+            );
+            let coid = order.client_order_id();
+            self.submit_order(order, None, None, None)?;
+            self.active_bid = Some(coid);
             debug!(
                 "Submitted bid price={:.6} size={} reservation={:.6} half_spread={:.6}",
-                bid_price, decision.bid_size, decision.reservation_price, decision.half_spread
+                bid_price,
+                decision.bid_size,
+                decision.reservation_price,
+                decision.half_spread
             );
         }
 
-        // Submit ask
+        // Submit ask (post-only)
         if let Some(ask_price) = decision.ask_price {
-            let oid = Uuid::new_v4();
-            engine.submit_order(OpenOrder {
-                order_id: oid,
-                side: OrderSide::Sell,
-                price: ask_price,
-                size: decision.ask_size,
-                is_post_only: true,
-            });
-            self.active_ask = Some(oid);
-            debug!(
-                "Submitted ask price={:.6} size={}",
-                ask_price, decision.ask_size
+            let price = Price::new(ask_price, 8);
+            let qty = Quantity::new(decision.ask_size, 8);
+            let order = self.core.order_factory().limit(
+                self.instrument_id,
+                OrderSide::Sell,
+                qty,
+                price,
+                Some(TimeInForce::Gtc),
+                None,       // expire_time
+                Some(true), // post_only
+                None,       // reduce_only
+                None,       // quote_quantity
+                None,       // display_qty
+                None,       // emulation_trigger
+                None,       // trigger_instrument_id
+                None,       // exec_algorithm_id
+                None,       // exec_algorithm_params
+                None,       // tags
+                None,       // client_order_id
             );
+            let coid = order.client_order_id();
+            self.submit_order(order, None, None, None)?;
+            self.active_ask = Some(coid);
+            debug!("Submitted ask price={:.6} size={}", ask_price, decision.ask_size);
         }
 
         self.last_quote_time = Some(Instant::now());
+        Ok(())
     }
 
-    fn on_order_event(&mut self, event: &OrderEvent) {
-        match event {
-            OrderEvent::Filled(fill) => {
-                let realized = self.inventory.on_fill(
-                    fill.price,
-                    fill.size,
-                    &fill.side,
-                    fill.fee,
-                    fill.timestamp,
-                );
-                self.risk.on_fill();
+    fn on_order_filled(&mut self, event: &OrderFilled) -> anyhow::Result<()> {
+        self.risk.on_fill();
 
-                // Clear tracking
-                if Some(fill.order_id) == self.active_bid {
-                    self.active_bid = None;
-                }
-                if Some(fill.order_id) == self.active_ask {
-                    self.active_ask = None;
-                }
-
-                info!(
-                    "Order filled side={:?} price={:.6} size={} fee={:.6} \
-                     realized_pnl={:.6} total_realized={:.6} position={:.6}",
-                    fill.side, fill.price, fill.size, fill.fee,
-                    realized, self.inventory.realized_pnl, self.inventory.position
-                );
-            }
-            OrderEvent::Rejected { order_id, reason } => {
-                self.risk.on_rejection();
-                warn!("Order rejected order_id={} reason={}", order_id, reason);
-
-                if Some(*order_id) == self.active_bid {
-                    self.active_bid = None;
-                }
-                if Some(*order_id) == self.active_ask {
-                    self.active_ask = None;
-                }
-            }
-            OrderEvent::Cancelled(order_id) => {
-                debug!("Order cancelled order_id={}", order_id);
-                if Some(*order_id) == self.active_bid {
-                    self.active_bid = None;
-                }
-                if Some(*order_id) == self.active_ask {
-                    self.active_ask = None;
-                }
-            }
-            OrderEvent::Accepted(order_id) => {
-                debug!("Order accepted order_id={}", order_id);
-            }
+        // Clear active order tracking
+        if Some(event.client_order_id) == self.active_bid {
+            self.active_bid = None;
         }
-    }
+        if Some(event.client_order_id) == self.active_ask {
+            self.active_ask = None;
+        }
 
-    fn on_stop(&mut self) {
-        let mid = self.last_mid;
-        let summary = self.summary_with_mid(mid);
+        // Track commission impact for Sharpe/drawdown (nautilus Portfolio handles actual PnL)
+        let commission = event.commission.map(|m| m.as_f64()).unwrap_or(0.0);
+        self.tracker.record_fill(-commission);
+
         info!(
-            "GLFT strategy stopped realized_pnl={:.6} unrealized_pnl={:.6} \
-             total_trades={} inventory={:.6} sharpe={:.4} max_dd={:.4}",
-            summary.realized_pnl, summary.unrealized_pnl,
-            summary.total_trades, summary.inventory,
-            summary.sharpe_ratio, summary.max_drawdown
+            "Order filled side={:?} price={} qty={} commission={}",
+            event.order_side, event.last_px, event.last_qty, commission
         );
+        Ok(())
     }
 
-    fn summary(&self) -> StrategySummary {
-        self.summary_with_mid(self.last_mid)
-    }
-}
-
-impl GlftStrategy {
-    fn summary_with_mid(&self, mid: f64) -> StrategySummary {
-        let unrealized = if mid > 0.0 {
-            self.inventory.unrealized_pnl(mid)
-        } else {
-            0.0
-        };
-        StrategySummary {
-            strategy_name: "GLFT".to_string(),
-            realized_pnl: self.inventory.realized_pnl,
-            unrealized_pnl: unrealized,
-            total_pnl: self.inventory.realized_pnl + unrealized,
-            total_trades: self.inventory.trades.len() as u64,
-            inventory: self.inventory.position,
-            sharpe_ratio: self.inventory.sharpe_ratio(),
-            max_drawdown: self.inventory.max_drawdown(),
-        }
+    fn on_stop(&mut self) -> anyhow::Result<()> {
+        info!(
+            "GLFT strategy stopped trades={} sharpe={:.4} max_dd={:.4}",
+            self.tracker.fill_count(),
+            self.tracker.sharpe_ratio(),
+            self.tracker.max_drawdown()
+        );
+        Ok(())
     }
 }

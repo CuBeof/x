@@ -3,6 +3,8 @@ run_mode = "Backtest"
 [data]
 data_dir = "data"
 symbol = "BTC-USDT.BINANCE"
+price_precision = 2
+size_precision = 6
 
 [logging]
 log_dir = "logs"

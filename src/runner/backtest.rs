@@ -1,93 +1,141 @@
-use std::path::PathBuf;
 use log::{info, warn};
+use std::path::PathBuf;
+
+use nautilus_backtest::{
+    config::{BacktestEngineConfig, SimulatedVenueConfig},
+    engine::BacktestEngine,
+};
+use nautilus_model::{
+    enums::{AccountType, BookType, OmsType},
+    identifiers::{InstrumentId, Venue},
+    instruments::{InstrumentAny, currency_pair::CurrencyPair},
+    types::{Currency, Money, Price, Quantity},
+};
+use nautilus_core::UnixNanos;
 
 use crate::config::AppConfig;
-use crate::data::{DataFeed, load_quotes, load_bars};
-use crate::engine::Engine;
-use crate::runner::Runner;
-use crate::strategies::{Strategy, StrategySummary};
+use crate::data::{load_quotes, load_bars_as_quotes};
+use crate::strategies::glft::GlftStrategy;
 
-pub struct BacktestRunner {
-    config: AppConfig,
+/// Build a minimal CurrencyPair stub for the given instrument_id.
+/// In production you would load this from an exchange REST API or catalog.
+fn build_instrument(
+    instrument_id: InstrumentId,
+    price_precision: u8,
+    size_precision: u8,
+) -> anyhow::Result<InstrumentAny> {
+    // Parse base/quote from symbol like "BTC-USDT" (part before the dot)
+    let symbol_str = instrument_id.symbol.inner().as_str();
+    let (base_str, quote_str) = symbol_str
+        .split_once('-')
+        .unwrap_or((symbol_str, "USDT"));
+
+    let base = Currency::from(base_str);
+    let quote = Currency::from(quote_str);
+
+    let price_increment = Price::new(10f64.powi(-(price_precision as i32)), price_precision);
+    let size_increment = Quantity::new(10f64.powi(-(size_precision as i32)), size_precision);
+
+    let pair = CurrencyPair::new_checked(
+        instrument_id,
+        instrument_id.symbol,
+        base,
+        quote,
+        price_precision,
+        size_precision,
+        price_increment,
+        size_increment,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        UnixNanos::default(),
+        UnixNanos::default(),
+    )?;
+    Ok(InstrumentAny::CurrencyPair(pair))
 }
 
-impl BacktestRunner {
-    pub fn new(config: AppConfig) -> Self {
-        Self { config }
+pub fn run_backtest(cfg: &AppConfig) -> anyhow::Result<()> {
+    info!("Initialising BacktestEngine for symbol={}", cfg.data.symbol);
+
+    let mut engine = BacktestEngine::new(BacktestEngineConfig::default())?;
+
+    // Parse venue from symbol (e.g. "BTC-USDT.BINANCE" → venue="BINANCE")
+    let venue_str = cfg.data.symbol
+        .split('.')
+        .nth(1)
+        .unwrap_or("SIM");
+    let venue = Venue::from(venue_str);
+
+    // Build InstrumentId
+    let instrument_id = InstrumentId::from(cfg.data.symbol.as_str());
+
+    let price_precision = cfg.data.price_precision.unwrap_or(2);
+    let size_precision = cfg.data.size_precision.unwrap_or(6);
+
+    engine.add_venue(
+        SimulatedVenueConfig::builder()
+            .venue(venue)
+            .oms_type(OmsType::Netting)
+            .account_type(AccountType::Cash)
+            .book_type(BookType::L1_MBP)
+            .starting_balances(vec![Money::from("100000 USDT")])
+            .build(),
+    )?;
+
+    // Register instrument before adding data
+    let instrument = build_instrument(instrument_id, price_precision, size_precision)?;
+    engine.add_instrument(&instrument)?;
+
+    // --- Load data ---
+    let data_dir = PathBuf::from(&cfg.data.data_dir);
+    let stem = cfg.data.symbol
+        .replace('.', "_")
+        .replace('-', "_")
+        .to_lowercase();
+
+    let quotes_path = data_dir.join(format!("{}_quotes.csv", stem));
+    let bars_path = data_dir.join(format!("{}_bars.csv", stem));
+
+    let data = if quotes_path.exists() {
+        info!("Loading quotes from {}", quotes_path.display());
+        let q = load_quotes(&quotes_path, instrument_id, price_precision, size_precision)?;
+        info!("Loaded {} QuoteTicks", q.len());
+        q
+    } else if bars_path.exists() {
+        info!("Loading bars from {} (synthetic quotes)", bars_path.display());
+        let q = load_bars_as_quotes(&bars_path, instrument_id, price_precision, size_precision)?;
+        info!("Loaded {} synthetic QuoteTicks", q.len());
+        q
+    } else {
+        warn!(
+            "No data found at {} or {}. Running empty backtest.",
+            quotes_path.display(),
+            bars_path.display()
+        );
+        vec![]
+    };
+
+    if !data.is_empty() {
+        engine.add_data(data, None, true, true)?;
     }
-}
 
-impl Runner for BacktestRunner {
-    fn run(&mut self, mut strategy: Box<dyn Strategy>) -> anyhow::Result<StrategySummary> {
-        info!("Starting backtest for symbol: {}", self.config.data.symbol);
+    // Add strategy
+    let strategy = GlftStrategy::new(instrument_id, cfg.strategy.glft.clone());
+    engine.add_strategy(strategy)?;
 
-        let data_dir = PathBuf::from(&self.config.data.data_dir);
+    info!("Starting backtest replay...");
+    engine.run(None, None, None, false)?;
 
-        // Convert symbol "BTC-USDT.BINANCE" → "btc_usdt_binance"
-        let symbol_file_stem = self
-            .config
-            .data
-            .symbol
-            .replace('.', "_")
-            .replace('-', "_")
-            .to_lowercase();
-
-        let quotes_path = data_dir.join(format!("{}_quotes.csv", symbol_file_stem));
-        let bars_path = data_dir.join(format!("{}_bars.csv", symbol_file_stem));
-
-        let feed = if quotes_path.exists() {
-            info!("Loading quotes from {}", quotes_path.display());
-            let quotes = load_quotes(&quotes_path)?;
-            info!("Loaded {} quotes", quotes.len());
-            DataFeed::from_quotes(quotes)
-        } else if bars_path.exists() {
-            info!("Loading bars from {}", bars_path.display());
-            let bars = load_bars(&bars_path)?;
-            info!("Loaded {} bars", bars.len());
-            DataFeed::from_bars(bars)
-        } else {
-            warn!(
-                "No data files found. Expected: {} or {}. Running with empty feed.",
-                quotes_path.display(),
-                bars_path.display()
-            );
-            DataFeed::from_quotes(vec![])
-        };
-
-        let mut engine = Engine::new(self.config.strategy.glft.maker_fee_override());
-        let total = feed.len();
-        info!("Starting replay of {} market events", total);
-
-        strategy.on_start();
-
-        for (i, event) in feed.enumerate() {
-            let order_events = engine.process_market_event(&event);
-            strategy.on_market_event(&event, &mut engine);
-            for oe in order_events {
-                strategy.on_order_event(&oe);
-            }
-            if total > 0 && (i + 1) % 10_000 == 0 {
-                info!(
-                    "Progress: {}/{} events ({:.1}%)",
-                    i + 1,
-                    total,
-                    (i + 1) as f64 / total as f64 * 100.0
-                );
-            }
-        }
-
-        strategy.on_stop();
-        let summary = strategy.summary();
-
-        info!("=== Backtest Complete ===");
-        info!("Realized PnL:   {:.6}", summary.realized_pnl);
-        info!("Unrealized PnL: {:.6}", summary.unrealized_pnl);
-        info!("Total PnL:      {:.6}", summary.total_pnl);
-        info!("Total Trades:   {}", summary.total_trades);
-        info!("Inventory:      {:.6}", summary.inventory);
-        info!("Sharpe Ratio:   {:.4}", summary.sharpe_ratio);
-        info!("Max Drawdown:   {:.4}", summary.max_drawdown);
-
-        Ok(summary)
-    }
+    info!("Backtest complete");
+    Ok(())
 }

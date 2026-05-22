@@ -1,5 +1,4 @@
 use std::collections::VecDeque;
-use crate::engine::event::{MarketEvent, TradeSide};
 
 pub struct VolatilityEstimator {
     window: usize,
@@ -25,7 +24,7 @@ impl VolatilityEstimator {
         self.prices.len() > 10
     }
 
-    /// Returns annualized volatility (assumes per-quote updates)
+    /// Returns annualized volatility (assumes per-quote updates).
     pub fn volatility(&self) -> f64 {
         if self.prices.len() < 2 {
             return 0.0;
@@ -95,32 +94,26 @@ impl OrderFlowImbalance {
         }
     }
 
-    pub fn update_trade(&mut self, size: f64, side: &TradeSide) {
-        match side {
-            TradeSide::Buy => {
-                self.buy_volume.push_back(size);
-                self.sell_volume.push_back(0.0);
-            }
-            TradeSide::Sell => {
-                self.sell_volume.push_back(size);
-                self.buy_volume.push_back(0.0);
-            }
-        }
+    pub fn update_trade(&mut self, size: f64, is_buy: bool) {
+        let (b, s) = if is_buy { (size, 0.0) } else { (0.0, size) };
+        self.buy_volume.push_back(b);
+        self.sell_volume.push_back(s);
         if self.buy_volume.len() > self.window {
             self.buy_volume.pop_front();
             self.sell_volume.pop_front();
         }
     }
 
-    /// Returns imbalance in [-1, 1]: +1 = all buys, -1 = all sells
+    /// Returns imbalance in [-1, 1]: +1 = all buys, -1 = all sells.
     pub fn imbalance(&self) -> f64 {
         let total_buy: f64 = self.buy_volume.iter().sum();
         let total_sell: f64 = self.sell_volume.iter().sum();
         let total = total_buy + total_sell;
         if total == 0.0 {
-            return 0.0;
+            0.0
+        } else {
+            (total_buy - total_sell) / total
         }
-        (total_buy - total_sell) / total
     }
 }
 
@@ -139,20 +132,10 @@ impl GlftIndicators {
         }
     }
 
-    pub fn update(&mut self, event: &MarketEvent) {
-        match event {
-            MarketEvent::QuoteUpdate(q) => {
-                self.vol.update(q.mid_price());
-                self.spread.update(q.bid_price, q.ask_price);
-            }
-            MarketEvent::TradeUpdate(t) => {
-                self.vol.update(t.price);
-                self.flow.update_trade(t.size, &t.side);
-            }
-            MarketEvent::BarUpdate(b) => {
-                self.vol.update(b.close);
-            }
-        }
+    pub fn update_quote(&mut self, bid: f64, ask: f64) {
+        let mid = (bid + ask) / 2.0;
+        self.vol.update(mid);
+        self.spread.update(bid, ask);
     }
 
     pub fn volatility(&self) -> f64 {

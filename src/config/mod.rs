@@ -34,6 +34,8 @@ pub struct DataConfig {
     pub symbol: String,
     pub start_date: Option<String>,
     pub end_date: Option<String>,
+    pub price_precision: Option<u8>,
+    pub size_precision: Option<u8>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

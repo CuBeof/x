@@ -86,7 +86,9 @@ impl RiskManager {
                 warn!(
                     "High volatility detected, pausing 30s \
                      current_vol={:.6} base_vol={:.6} threshold={:.6}",
-                    vol, base_vol, base_vol * self.vol_multiplier
+                    vol,
+                    base_vol,
+                    base_vol * self.vol_multiplier
                 );
                 return &self.state;
             }
@@ -96,12 +98,12 @@ impl RiskManager {
         &self.state
     }
 
-    /// Returns true if we are allowed to place new quotes
+    /// Returns true if we are allowed to place new quotes.
     pub fn is_quoting_allowed(&self) -> bool {
         matches!(self.state, RiskState::Normal | RiskState::InventoryBreached)
     }
 
-    /// Returns true if we should only place orders that reduce inventory
+    /// Returns true if we should only place orders that reduce inventory.
     pub fn is_reduce_only(&self) -> bool {
         self.state == RiskState::InventoryBreached
     }

@@ -1,19 +1,11 @@
 use std::path::Path;
-use crate::engine::event::{Bar, Quote, MarketEvent};
-use chrono::{DateTime, Utc, TimeZone};
-use serde::Deserialize;
 use anyhow::Context;
-
-// CSV record types for deserialization
-#[derive(Debug, Deserialize)]
-struct BarRecord {
-    timestamp: String,
-    open: f64,
-    high: f64,
-    low: f64,
-    close: f64,
-    volume: f64,
-}
+use serde::Deserialize;
+use nautilus_model::data::{Data, QuoteTick};
+use nautilus_model::identifiers::InstrumentId;
+use nautilus_model::types::{Price, Quantity};
+use nautilus_core::UnixNanos;
+use chrono::DateTime;
 
 #[derive(Debug, Deserialize)]
 struct QuoteRecord {
@@ -24,95 +16,92 @@ struct QuoteRecord {
     ask_size: f64,
 }
 
-fn parse_timestamp(s: &str) -> anyhow::Result<DateTime<Utc>> {
-    // Try unix ms first, then ISO8601
+#[derive(Debug, Deserialize)]
+struct BarRecord {
+    timestamp: String,
+    open: f64,
+    high: f64,
+    low: f64,
+    close: f64,
+    volume: f64,
+}
+
+fn parse_unix_nanos(s: &str) -> anyhow::Result<UnixNanos> {
+    // Try unix ms (integer)
     if let Ok(ms) = s.parse::<i64>() {
-        Ok(Utc
-            .timestamp_millis_opt(ms)
-            .single()
-            .context("invalid timestamp millis")?)
-    } else {
-        Ok(DateTime::parse_from_rfc3339(s)?.with_timezone(&Utc))
+        return Ok(UnixNanos::from(ms as u64 * 1_000_000));
     }
+    // Try ISO8601
+    let dt = DateTime::parse_from_rfc3339(s).context("invalid timestamp")?;
+    let nanos = dt.timestamp_nanos_opt().unwrap_or(0) as u64;
+    Ok(UnixNanos::from(nanos))
 }
 
-pub fn load_bars(path: &Path) -> anyhow::Result<Vec<Bar>> {
-    let mut reader = csv::Reader::from_path(path)?;
-    let mut bars = Vec::new();
-    for result in reader.deserialize() {
-        let record: BarRecord = result?;
-        bars.push(Bar {
-            open: record.open,
-            high: record.high,
-            low: record.low,
-            close: record.close,
-            volume: record.volume,
-            timestamp: parse_timestamp(&record.timestamp)?,
-        });
-    }
-    bars.sort_by_key(|b| b.timestamp);
-    Ok(bars)
-}
-
-pub fn load_quotes(path: &Path) -> anyhow::Result<Vec<Quote>> {
+/// Load QuoteTick data from a CSV file.
+/// Expected CSV columns: timestamp,bid_price,ask_price,bid_size,ask_size
+pub fn load_quotes(
+    path: &Path,
+    instrument_id: InstrumentId,
+    price_precision: u8,
+    size_precision: u8,
+) -> anyhow::Result<Vec<Data>> {
     let mut reader = csv::Reader::from_path(path)?;
     let mut quotes = Vec::new();
-    for result in reader.deserialize() {
-        let record: QuoteRecord = result?;
-        quotes.push(Quote {
-            bid_price: record.bid_price,
-            ask_price: record.ask_price,
-            bid_size: record.bid_size,
-            ask_size: record.ask_size,
-            timestamp: parse_timestamp(&record.timestamp)?,
-        });
+
+    for result in reader.deserialize::<QuoteRecord>() {
+        let rec = result?;
+        let ts = parse_unix_nanos(&rec.timestamp)?;
+
+        let bid_price = Price::new(rec.bid_price, price_precision);
+        let ask_price = Price::new(rec.ask_price, price_precision);
+        let bid_size = Quantity::new(rec.bid_size, size_precision);
+        let ask_size = Quantity::new(rec.ask_size, size_precision);
+
+        let quote = QuoteTick::new(instrument_id, bid_price, ask_price, bid_size, ask_size, ts, ts);
+        quotes.push(Data::Quote(quote));
     }
-    quotes.sort_by_key(|q| q.timestamp);
+
+    // Sort chronologically
+    quotes.sort_by_key(|d| {
+        if let Data::Quote(q) = d {
+            q.ts_event
+        } else {
+            UnixNanos::default()
+        }
+    });
     Ok(quotes)
 }
 
-/// Chronological event feed that supports len() before consuming as iterator
-pub struct DataFeed {
-    events: std::collections::VecDeque<MarketEvent>,
-    total: usize,
-}
+/// Load bars as synthetic QuoteTick data (using high as ask, low as bid).
+/// Fallback when only OHLCV data is available.
+pub fn load_bars_as_quotes(
+    path: &Path,
+    instrument_id: InstrumentId,
+    price_precision: u8,
+    size_precision: u8,
+) -> anyhow::Result<Vec<Data>> {
+    let mut reader = csv::Reader::from_path(path)?;
+    let mut quotes = Vec::new();
 
-impl DataFeed {
-    pub fn from_quotes(quotes: Vec<Quote>) -> Self {
-        let mut events: Vec<MarketEvent> =
-            quotes.into_iter().map(MarketEvent::QuoteUpdate).collect();
-        events.sort_by_key(|e| e.timestamp());
-        let total = events.len();
-        Self {
-            events: events.into(),
-            total,
+    for result in reader.deserialize::<BarRecord>() {
+        let rec = result?;
+        let ts = parse_unix_nanos(&rec.timestamp)?;
+
+        // Use high as ask, low as bid (intrabar best approximation)
+        let bid_price = Price::new(rec.low, price_precision);
+        let ask_price = Price::new(rec.high, price_precision);
+        let size = Quantity::new(rec.volume, size_precision);
+
+        let quote = QuoteTick::new(instrument_id, bid_price, ask_price, size, size, ts, ts);
+        quotes.push(Data::Quote(quote));
+    }
+
+    quotes.sort_by_key(|d| {
+        if let Data::Quote(q) = d {
+            q.ts_event
+        } else {
+            UnixNanos::default()
         }
-    }
-
-    pub fn from_bars(bars: Vec<Bar>) -> Self {
-        let mut events: Vec<MarketEvent> =
-            bars.into_iter().map(MarketEvent::BarUpdate).collect();
-        events.sort_by_key(|e| e.timestamp());
-        let total = events.len();
-        Self {
-            events: events.into(),
-            total,
-        }
-    }
-
-    pub fn len(&self) -> usize {
-        self.total
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.total == 0
-    }
-}
-
-impl Iterator for DataFeed {
-    type Item = MarketEvent;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        self.events.pop_front()
-    }
+    });
+    Ok(quotes)
 }

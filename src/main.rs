@@ -5,22 +5,16 @@ use anyhow::Context;
 mod config;
 mod logging;
 mod data;
-mod engine;
 mod runner;
 mod strategies;
 
 use config::{load_config, RunMode};
-use strategies::glft::GlftStrategy;
-use runner::Runner;
 
 #[derive(Parser)]
-#[command(name = "market-maker", about = "GLFT Market Maker Bot")]
+#[command(name = "market-maker", about = "GLFT Market Maker Bot (nautilus_trader)")]
 struct Cli {
-    /// Path to config file
     #[arg(short, long, default_value = "config/backtest.toml")]
     config: String,
-
-    /// Override run mode (backtest, paper, live)
     #[arg(short, long)]
     mode: Option<String>,
 }
@@ -39,41 +33,18 @@ async fn main() -> anyhow::Result<()> {
         };
     }
 
-    let _guard = logging::init_logging(&cfg.logging)?;
+    let _log_handle = logging::init_logging(&cfg.logging)?;
 
-    info!("Starting market-maker in {:?} mode", cfg.run_mode);
-    info!("Strategy: GLFT | Symbol: {}", cfg.data.symbol);
     info!(
-        "gamma={} kappa={} sigma={}",
-        cfg.strategy.glft.gamma,
-        cfg.strategy.glft.kappa,
-        cfg.strategy.glft.sigma
+        "Starting market-maker in {:?} mode | symbol={}",
+        cfg.run_mode, cfg.data.symbol
     );
 
-    let strategy = Box::new(GlftStrategy::new(cfg.strategy.glft.clone()));
-
-    let summary = match cfg.run_mode {
-        RunMode::Backtest => {
-            let mut runner = runner::backtest::BacktestRunner::new(cfg);
-            runner.run(strategy)?
-        }
-        RunMode::Paper => {
-            let mut runner = runner::paper::PaperRunner::new(cfg);
-            runner.run(strategy)?
-        }
-        RunMode::Live => {
-            let mut runner = runner::live::LiveRunner::new(cfg);
-            runner.run(strategy)?
-        }
-    };
-
-    println!("\n=== Final Summary ===");
-    println!("Realized PnL:   {:.6}", summary.realized_pnl);
-    println!("Unrealized PnL: {:.6}", summary.unrealized_pnl);
-    println!("Total Trades:   {}", summary.total_trades);
-    println!("Inventory:      {:.6}", summary.inventory);
-    println!("Sharpe Ratio:   {:.4}", summary.sharpe_ratio);
-    println!("Max Drawdown:   {:.4}", summary.max_drawdown);
+    match cfg.run_mode {
+        RunMode::Backtest => runner::backtest::run_backtest(&cfg)?,
+        RunMode::Paper => runner::paper::run_paper(&cfg)?,
+        RunMode::Live => runner::live::run_live(&cfg)?,
+    }
 
     Ok(())
 }
