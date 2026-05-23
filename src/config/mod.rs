@@ -18,7 +18,7 @@ pub struct LoggingConfig {
 #[derive(Debug, Clone, Deserialize)]
 pub struct DataConfig {
     pub data_dir: String,
-    /// InstrumentId string, e.g. "BTC-USDT.BINANCE"
+    /// InstrumentId string, e.g. "ETH-USDT-SWAP.OKX"
     pub symbol: String,
     pub start_date: Option<String>,
     pub end_date: Option<String>,
@@ -26,6 +26,10 @@ pub struct DataConfig {
     pub price_precision: u8,
     /// Number of decimal places for sizes/quantities
     pub size_precision: u8,
+    /// OKX L2 orderbook NDJSON file (relative to data_dir), e.g. "ETH-USDT-SWAP-L2orderbook.data"
+    pub orderbook_file: Option<String>,
+    /// OKX trades CSV file (relative to data_dir), e.g. "ETH-USDT-SWAP-trades.csv"
+    pub trades_file: Option<String>,
 }
 
 /// Simulated venue (backtest only).

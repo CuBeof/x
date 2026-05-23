@@ -23,3 +23,4 @@ anyhow         = "1"
 thiserror      = "1"
 csv            = "1"
 rust_decimal   = { version = "1", features = ["serde-with-str"] }
+serde_json     = "1"

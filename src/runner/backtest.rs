@@ -14,17 +14,14 @@ use nautilus_model::{
 use nautilus_core::UnixNanos;
 
 use crate::config::{BacktestConfig, VenueConfig};
-use crate::data::{load_quotes, load_bars_as_quotes};
+use crate::data::{load_quotes, load_bars_as_quotes, okx};
 use crate::strategies::glft::GlftStrategy;
 
-/// Build a minimal CurrencyPair stub for the given instrument_id.
-/// In production you would load this from an exchange REST API or catalog.
 fn build_instrument(
     instrument_id: InstrumentId,
     price_precision: u8,
     size_precision: u8,
 ) -> anyhow::Result<InstrumentAny> {
-    // Parse base/quote from symbol like "BTC-USDT" (part before the dot)
     let symbol_str = instrument_id.symbol.inner().as_str();
     let (base_str, quote_str) = symbol_str
         .split_once('-')
@@ -64,25 +61,24 @@ fn build_instrument(
     Ok(InstrumentAny::CurrencyPair(pair))
 }
 
-/// Parse VenueConfig strings into nautilus enums.
 fn parse_venue_config(vcfg: &VenueConfig) -> anyhow::Result<SimulatedVenueConfig> {
     let venue = Venue::from(vcfg.name.as_str());
 
     let oms_type = match vcfg.oms_type.as_str() {
-        "Netting"  => OmsType::Netting,
-        "Hedging"  => OmsType::Hedging,
-        other      => anyhow::bail!("Unknown oms_type: {}", other),
+        "Netting" => OmsType::Netting,
+        "Hedging" => OmsType::Hedging,
+        other => anyhow::bail!("Unknown oms_type: {}", other),
     };
     let account_type = match vcfg.account_type.as_str() {
-        "Cash"   => AccountType::Cash,
+        "Cash" => AccountType::Cash,
         "Margin" => AccountType::Margin,
-        other    => anyhow::bail!("Unknown account_type: {}", other),
+        other => anyhow::bail!("Unknown account_type: {}", other),
     };
     let book_type = match vcfg.book_type.as_str() {
         "L1_MBP" => BookType::L1_MBP,
         "L2_MBP" => BookType::L2_MBP,
         "L3_MBO" => BookType::L3_MBO,
-        other    => anyhow::bail!("Unknown book_type: {}", other),
+        other => anyhow::bail!("Unknown book_type: {}", other),
     };
 
     Ok(SimulatedVenueConfig::builder()
@@ -101,47 +97,75 @@ pub fn run_backtest(cfg: &BacktestConfig) -> anyhow::Result<()> {
     );
 
     let mut engine = BacktestEngine::new(BacktestEngineConfig::default())?;
-
     engine.add_venue(parse_venue_config(&cfg.venue)?)?;
 
     let instrument_id = InstrumentId::from(cfg.data.symbol.as_str());
-    let price_precision = cfg.data.price_precision;
-    let size_precision  = cfg.data.size_precision;
+    let price_prec = cfg.data.price_precision;
+    let size_prec = cfg.data.size_precision;
 
-    let instrument = build_instrument(instrument_id, price_precision, size_precision)?;
+    let instrument = build_instrument(instrument_id, price_prec, size_prec)?;
     engine.add_instrument(&instrument)?;
 
-    // --- Load data ---
     let data_dir = PathBuf::from(&cfg.data.data_dir);
-    let stem = cfg.data.symbol
-        .replace('.', "_")
-        .replace('-', "_")
-        .to_lowercase();
 
-    let quotes_path = data_dir.join(format!("{}_quotes.csv", stem));
-    let bars_path   = data_dir.join(format!("{}_bars.csv", stem));
+    // --- Load L2 orderbook (OKX NDJSON) if configured ---
+    if let Some(ref ob_file) = cfg.data.orderbook_file {
+        let ob_path = data_dir.join(ob_file);
+        if ob_path.exists() {
+            info!("Loading L2 orderbook from {}", ob_path.display());
+            let deltas = okx::load_l2_orderbook(&ob_path, instrument_id, price_prec, size_prec)?;
+            info!("Loaded {} OrderBookDeltas", deltas.len());
+            engine.add_data(deltas, None, true, true)?;
+        } else {
+            warn!("Orderbook file not found: {}", ob_path.display());
+        }
+    }
 
-    let data = if quotes_path.exists() {
-        info!("Loading quotes from {}", quotes_path.display());
-        let q = load_quotes(&quotes_path, instrument_id, price_precision, size_precision)?;
-        info!("Loaded {} QuoteTicks", q.len());
-        q
-    } else if bars_path.exists() {
-        info!("Loading bars from {} (synthetic quotes)", bars_path.display());
-        let q = load_bars_as_quotes(&bars_path, instrument_id, price_precision, size_precision)?;
-        info!("Loaded {} synthetic QuoteTicks", q.len());
-        q
-    } else {
-        warn!(
-            "No data found at {} or {}. Running empty backtest.",
-            quotes_path.display(),
-            bars_path.display()
-        );
-        vec![]
-    };
+    // --- Load trades (OKX CSV) if configured ---
+    if let Some(ref tr_file) = cfg.data.trades_file {
+        let tr_path = data_dir.join(tr_file);
+        if tr_path.exists() {
+            info!("Loading trades from {}", tr_path.display());
+            let trades = okx::load_trades(&tr_path, instrument_id, price_prec, size_prec)?;
+            info!("Loaded {} TradeTicks", trades.len());
+            engine.add_data(trades, None, true, true)?;
+        } else {
+            warn!("Trades file not found: {}", tr_path.display());
+        }
+    }
 
-    if !data.is_empty() {
-        engine.add_data(data, None, true, true)?;
+    // --- Fallback to generic quote/bar CSV if no OKX files configured ---
+    if cfg.data.orderbook_file.is_none() && cfg.data.trades_file.is_none() {
+        let stem = cfg.data.symbol
+            .replace('.', "_")
+            .replace('-', "_")
+            .to_lowercase();
+
+        let quotes_path = data_dir.join(format!("{}_quotes.csv", stem));
+        let bars_path = data_dir.join(format!("{}_bars.csv", stem));
+
+        let data = if quotes_path.exists() {
+            info!("Loading quotes from {}", quotes_path.display());
+            let q = load_quotes(&quotes_path, instrument_id, price_prec, size_prec)?;
+            info!("Loaded {} QuoteTicks", q.len());
+            q
+        } else if bars_path.exists() {
+            info!("Loading bars from {} (synthetic quotes)", bars_path.display());
+            let q = load_bars_as_quotes(&bars_path, instrument_id, price_prec, size_prec)?;
+            info!("Loaded {} synthetic QuoteTicks", q.len());
+            q
+        } else {
+            warn!(
+                "No data found at {} or {}. Running empty backtest.",
+                quotes_path.display(),
+                bars_path.display()
+            );
+            vec![]
+        };
+
+        if !data.is_empty() {
+            engine.add_data(data, None, true, true)?;
+        }
     }
 
     let strategy = GlftStrategy::new(instrument_id, cfg.strategy.clone());
@@ -149,7 +173,6 @@ pub fn run_backtest(cfg: &BacktestConfig) -> anyhow::Result<()> {
 
     info!("Starting backtest replay...");
     engine.run(None, None, None, false)?;
-
     info!("Backtest complete");
     Ok(())
 }
