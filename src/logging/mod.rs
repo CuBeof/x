@@ -1,59 +1,64 @@
 use log::LevelFilter;
-use log4rs::{
-    append::{console::ConsoleAppender, file::FileAppender},
-    config::{Appender, Config, Logger, Root},
-    encode::pattern::PatternEncoder,
+use nautilus_common::{
+    logging::{
+        init_logging as nautilus_init_logging,
+        logger::{LogGuard, LoggerConfig},
+        writer::FileWriterConfig,
+    },
 };
-use chrono::Local;
+use nautilus_core::UUID4;
+use nautilus_model::identifiers::TraderId;
+
 use crate::config::LoggingConfig;
 
-// Timestamp pattern matches nautilus_trader's log format:
-// 2024-01-15T10:30:00.123 INFO market_maker::runner::backtest - Message
-const FILE_PATTERN: &str = "{d(%Y-%m-%dT%H:%M:%S%.3f)} {l:<5} {t} - {m}{n}";
-const STDOUT_PATTERN: &str = "{d(%H:%M:%S%.3f)} {h({l:<5})} {t} - {m}{n}";
-
-/// Initialise `log4rs` logging. The returned `Handle` must be kept alive for
-/// the duration of the program (dropping it resets the logger).
-pub fn init_logging(cfg: &LoggingConfig) -> anyhow::Result<log4rs::Handle> {
-    let level: LevelFilter = cfg
-        .log_level
-        .parse()
-        .unwrap_or(LevelFilter::Info);
-
-    // ── stdout appender ──────────────────────────────────────────────────────
-    let stdout = ConsoleAppender::builder()
-        .encoder(Box::new(PatternEncoder::new(STDOUT_PATTERN)))
-        .build();
-
-    let mut config_builder = Config::builder()
-        .appender(Appender::builder().build("stdout", Box::new(stdout)));
-
-    let mut root_builder = Root::builder().appender("stdout");
-
-    // ── file appender (optional) ──────────────────────────────────────────────
-    if cfg.log_to_file {
-        std::fs::create_dir_all(&cfg.log_dir)?;
-
-        // File name format: {level}_{YYYY-MM-DD_HH-MM-SS}.log
-        // Mirrors nautilus_trader: {trader_id}_{%Y-%m-%d_%H%M%S}_{instance_id}.log
-        let timestamp = Local::now().format("%Y-%m-%d_%H-%M-%S");
-        let filename = format!("{}_{}.log", cfg.log_level.to_lowercase(), timestamp);
-        let log_path = format!("{}/{}", cfg.log_dir, filename);
-
-        let file_appender = FileAppender::builder()
-            .encoder(Box::new(PatternEncoder::new(FILE_PATTERN)))
-            .build(&log_path)?;
-
-        config_builder = config_builder
-            .appender(Appender::builder().build("file", Box::new(file_appender)));
-        root_builder = root_builder.appender("file");
-
-        // Suppress overly verbose dependency logs to file
-        config_builder = config_builder
-            .logger(Logger::builder().build("tokio", LevelFilter::Warn))
-            .logger(Logger::builder().build("mio", LevelFilter::Warn));
+fn parse_level(s: &str) -> LevelFilter {
+    match s.to_uppercase().as_str() {
+        "TRACE" => LevelFilter::Trace,
+        "DEBUG" => LevelFilter::Debug,
+        "INFO"  => LevelFilter::Info,
+        "WARN" | "WARNING" => LevelFilter::Warn,
+        "ERROR" => LevelFilter::Error,
+        _       => LevelFilter::Info,
     }
+}
 
-    let config = config_builder.build(root_builder.build(level))?;
-    Ok(log4rs::init_config(config)?)
+/// Initialise nautilus logging. The returned `LogGuard` must be kept alive
+/// for the duration of the program.
+pub fn init_logging(cfg: &LoggingConfig) -> anyhow::Result<LogGuard> {
+    let level = parse_level(&cfg.log_level);
+
+    let fw_config = if cfg.log_to_file {
+        std::fs::create_dir_all(&cfg.log_dir)?;
+        FileWriterConfig::new(
+            Some(cfg.log_dir.clone()),
+            None,   // file_name: None → nautilus generates a timestamped name
+            None,   // file_format: None → plain text
+            None,   // file_rotate: None → no size-based rotation
+        )
+    } else {
+        FileWriterConfig::new(None, None, None, None)
+    };
+
+    let logger_cfg = if cfg.log_to_file {
+        LoggerConfig::builder()
+            .stdout_level(level)
+            .fileout_level(level)
+            .is_colored(true)
+            .file_config(fw_config.clone())
+            .build()
+    } else {
+        LoggerConfig::builder()
+            .stdout_level(level)
+            .fileout_level(LevelFilter::Off)
+            .is_colored(true)
+            .build()
+    };
+
+    nautilus_init_logging(
+        TraderId::new("GLFT-001"),
+        UUID4::new(),
+        logger_cfg,
+        fw_config,
+    )
+    .map_err(|e| anyhow::anyhow!("Failed to initialize nautilus logger: {e}"))
 }
