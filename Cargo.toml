@@ -1,0 +1,17 @@
+[package]
+name = "market-maker"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+# nautilus_trader crates
+nautilus-backtest = { version = "0.57.0", features = ["streaming"] }
+nautilus-model     = "0.57.0"
+nautilus-trading   = "0.57.0"
+nautilus-common    = "0.57.0"
+
+# Infrastructure
+log            = "0.4"
+anyhow         = "1"
+rust_decimal   = "1"
+ustr = "1.1.0"
