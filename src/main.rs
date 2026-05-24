@@ -1,6 +1,8 @@
+mod config;
 mod strategies;
 
-use anyhow::Context;
+use anyhow::{bail, Context};
+use clap::Parser;
 use log::LevelFilter;
 use nautilus_backtest::{
     config::{
@@ -19,51 +21,85 @@ use std::path::PathBuf;
 use std::str::FromStr;
 use ustr::Ustr;
 
+use config::{BacktestConfig, DataType};
 use strategies::glft::GlftStrategy;
 
-fn main() -> anyhow::Result<()> {
-    // 1. Create instrument and generate sample data
-    let instrument_id = InstrumentId::from_str("ETHUSDT-PERP.SIM")?;
+#[derive(Parser)]
+#[command(about = "Nautilus Trader backtest runner")]
+struct Args {
+    /// Path to TOML config file
+    #[arg(short, long, default_value = "configs/backtest.toml")]
+    config: PathBuf,
+}
 
-    let catalog_dir = PathBuf::from("data/catalog");
-    let catalog_path = catalog_dir
-        .to_str()
-        .context("catalog path not valid UTF-8")?
-        .to_string();
+fn main() -> anyhow::Result<()> {
+    let args = Args::parse();
+    let cfg = BacktestConfig::from_file(&args.config)?;
+
+    let instrument_id = InstrumentId::from_str(&cfg.instrument.id)
+        .with_context(|| format!("invalid instrument id: {}", cfg.instrument.id))?;
+
+    let oms_type = match cfg.venue.oms_type.as_str() {
+        "Hedging" => OmsType::Hedging,
+        "Netting" => OmsType::Netting,
+        other => bail!("unsupported oms_type: {other}"),
+    };
+    let account_type = match cfg.venue.account_type.as_str() {
+        "Margin" => AccountType::Margin,
+        "Cash" => AccountType::Cash,
+        other => bail!("unsupported account_type: {other}"),
+    };
+    let book_type = match cfg.venue.book_type.as_str() {
+        "L1_MBP" => BookType::L1_MBP,
+        "L2_MBP" => BookType::L2_MBP,
+        "L3_MBO" => BookType::L3_MBO,
+        other => bail!("unsupported book_type: {other}"),
+    };
 
     let venue_config = BacktestVenueConfig::builder()
-        .name(Ustr::from("SIM"))
-        .oms_type(OmsType::Hedging)
-        .account_type(AccountType::Margin)
-        .book_type(BookType::L1_MBP)
-        .starting_balances(vec!["1_000 USDT".to_string()])
+        .name(Ustr::from(&cfg.venue.name))
+        .oms_type(oms_type)
+        .account_type(account_type)
+        .book_type(book_type)
+        .starting_balances(cfg.venue.starting_balances.clone())
         .build();
 
-    let book_data = BacktestDataConfig::builder()
-        .data_type(NautilusDataType::OrderBookDelta)
-        .catalog_path(catalog_path.clone())
-        .instrument_id(instrument_id)
-        .build();
+    let data_configs: Vec<BacktestDataConfig> = cfg
+        .data
+        .types
+        .iter()
+        .map(|dt| {
+            let data_type = match dt {
+                DataType::QuoteTick => NautilusDataType::QuoteTick,
+                DataType::OrderBookDelta => NautilusDataType::OrderBookDelta,
+                DataType::TradeTick => NautilusDataType::TradeTick,
+            };
+            BacktestDataConfig::builder()
+                .data_type(data_type)
+                .catalog_path(cfg.catalog.path.clone())
+                .instrument_id(instrument_id)
+                .build()
+        })
+        .collect();
 
-    let trade_data = BacktestDataConfig::builder()
-        .data_type(NautilusDataType::TradeTick)
-        .catalog_path(catalog_path)
-        .instrument_id(instrument_id)
-        .build();
+    let stdout_level = LevelFilter::from_str(&cfg.logging.stdout_level)
+        .with_context(|| format!("invalid stdout_level: {}", cfg.logging.stdout_level))?;
+    let fileout_level = LevelFilter::from_str(&cfg.logging.fileout_level)
+        .with_context(|| format!("invalid fileout_level: {}", cfg.logging.fileout_level))?;
 
     let file_config = FileWriterConfig {
-        directory: Some("logs".to_string()),
+        directory: Some(cfg.logging.log_dir.clone()),
         file_name: Some(instrument_id.to_string().replace(".", "_")),
         file_rotate: Some(FileRotateConfig::from((
-            500_000_000u64, // max file size: 500 MB
-            5u32,           // max backup count
+            cfg.logging.max_file_size_mb * 1_000_000,
+            cfg.logging.max_backups,
         ))),
         ..Default::default()
     };
 
     let logging = LoggerConfig::builder()
-        .stdout_level(LevelFilter::Info)
-        .fileout_level(LevelFilter::Debug)
+        .stdout_level(stdout_level)
+        .fileout_level(fileout_level)
         .file_config(file_config)
         .is_colored(true)
         .print_config(true)
@@ -72,21 +108,21 @@ fn main() -> anyhow::Result<()> {
     let engine_config = BacktestEngineConfig::builder().logging(logging).build();
 
     let run_config = BacktestRunConfig::builder()
-        .id("okx-backtest".to_string())
+        .id(cfg.engine.run_id.clone())
         .venues(vec![venue_config])
-        .data(vec![book_data, trade_data])
+        .data(data_configs)
         .engine(engine_config)
-        .chunk_size(10_000)
+        .chunk_size(cfg.engine.chunk_size)
         .build();
 
     let mut node = BacktestNode::new(vec![run_config])?;
     node.build()?;
 
-    let engine = node.get_engine_mut("okx-backtest").unwrap();
+    let engine = node.get_engine_mut(&cfg.engine.run_id).unwrap();
 
-    let strategy = GlftStrategy::new(instrument_id.clone(), None);
+    let strategy = GlftStrategy::new(instrument_id, None);
     engine.add_strategy(strategy)?;
-    // 7. Run backtest
+
     let results = node.run()?;
 
     println!("Backtest complete!");
