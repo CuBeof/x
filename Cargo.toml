@@ -14,4 +14,7 @@ nautilus-common    = "0.57.0"
 log            = "0.4"
 anyhow         = "1"
 rust_decimal   = "1"
-ustr = "1.1.0"
+ustr           = "1.1.0"
+serde          = { version = "1", features = ["derive"] }
+toml           = "0.8"
+clap           = { version = "4", features = ["derive"] }

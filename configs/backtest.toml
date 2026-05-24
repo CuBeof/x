@@ -1,0 +1,27 @@
+[catalog]
+path = "data/catalog"
+
+[instrument]
+id = "ETHUSDT-PERP.SIM"
+
+# Loại dữ liệu đưa vào engine: "quote_tick", "order_book_delta", "trade_tick"
+[data]
+types = ["order_book_delta", "trade_tick"]
+
+[venue]
+name = "SIM"
+oms_type = "Hedging"
+account_type = "Margin"
+book_type = "L1_MBP"
+starting_balances = ["1_000 USDT"]
+
+[engine]
+run_id = "okx-backtest"
+chunk_size = 10_000
+
+[logging]
+stdout_level = "info"
+fileout_level = "debug"
+log_dir = "logs"
+max_file_size_mb = 500
+max_backups = 5
