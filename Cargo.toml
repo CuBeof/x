@@ -1,3 +1,7 @@
+[workspace]
+members = [".", "crates/hist-parser"]
+resolver = "2"
+
 [package]
 name = "market-maker"
 version = "0.1.0"
