@@ -26,7 +26,24 @@ struct OBLine {
     asks: Vec<serde_json::Value>,
     #[serde(default)]
     bids: Vec<serde_json::Value>,
+    // OKX sends ts as a JSON string, e.g. "1779408000005". Accept both string and integer.
+    #[serde(deserialize_with = "deserialize_ts")]
     ts: u64,
+}
+
+fn deserialize_ts<'de, D: serde::Deserializer<'de>>(d: D) -> Result<u64, D::Error> {
+    let v = serde_json::Value::deserialize(d)?;
+    match &v {
+        serde_json::Value::Number(n) => n
+            .as_u64()
+            .ok_or_else(|| serde::de::Error::custom(format!("ts out of u64 range: {n}"))),
+        serde_json::Value::String(s) => s
+            .parse::<u64>()
+            .map_err(|_| serde::de::Error::custom(format!("ts is not a valid u64: {s:?}"))),
+        other => Err(serde::de::Error::custom(format!(
+            "ts must be number or string, got {other:?}"
+        ))),
+    }
 }
 
 // ---------------------------------------------------------------------------
