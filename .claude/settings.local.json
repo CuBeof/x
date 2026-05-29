@@ -1,0 +1,16 @@
+{
+  "permissions": {
+    "allow": [
+      "mcp__codegraph__codegraph_files",
+      "PowerShell(cargo check)",
+      "PowerShell(cargo check --manifest-path \"data\\\\okx2parquet\\\\Cargo.toml\")",
+      "PowerShell(cargo check --manifest-path \"data\\\\okx2parquet\\\\Cargo.toml\" --message-format short)",
+      "Read(//c/Users/haipb/.cargo/registry/src/**)",
+      "PowerShell(cargo check --manifest-path \"data\\\\okx2parquet\\\\Cargo.toml\" --message-format short 2>&1)",
+      "Bash(cargo search *)",
+      "Bash(cargo info *)",
+      "WebFetch(domain:docs.rs)",
+      "Bash(cargo build *)"
+    ]
+  }
+}

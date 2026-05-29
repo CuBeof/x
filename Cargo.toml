@@ -1,24 +1,29 @@
-[workspace]
-members = [".", "crates/hist-parser"]
-resolver = "2"
-
 [package]
-name = "market-maker"
+name = "glft-mm-rust"
 version = "0.1.0"
 edition = "2021"
+rust-version = "1.95"
+description = "Extended GLFT market-making strategy for nautilus_trader"
+
+[[bin]]
+name = "backtest"
+path = "src/bin/backtest.rs"
+
 
 [dependencies]
-# nautilus_trader crates
-nautilus-backtest = { version = "0.57.0", features = ["streaming"] }
-nautilus-model     = "0.57.0"
-nautilus-trading   = "0.57.0"
-nautilus-common    = "0.57.0"
+nautilus-common   = "0.57"
+nautilus-model    = "0.57"
+nautilus-trading  = "0.57"
+nautilus-backtest = { version="0.57" , features = ["streaming"] }
+nautilus-core     = "0.57"
+nautilus-data     = "0.57"
 
-# Infrastructure
-log            = "0.4"
-anyhow         = "1"
-rust_decimal   = "1"
-ustr           = "1.1.0"
-serde          = { version = "1", features = ["derive"] }
-toml           = "0.8"
-clap           = { version = "4", features = ["derive"] }
+anyhow       = "1"
+log          = "0.4"
+rust_decimal = { version = "1", features = ["maths"] }
+nautilus-persistence = "0.57.0"
+clap = "4.6.1"
+serde = "1.0.228"
+csv = "1.4.0"
+rust_decimal_macros = "1.40.0"
+serde_json = "1.0.150"
